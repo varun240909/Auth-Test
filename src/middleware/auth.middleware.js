@@ -1,5 +1,5 @@
-import jwt from "jsonwebtoken";
 import User from "../models/User.model.js";
+import { verifyAccessToken } from "../utils/token.js";
 
 export const protect = async (req, res, next) => {
   try {
@@ -10,20 +10,26 @@ export const protect = async (req, res, next) => {
     }
 
     if (!token) {
+      token = req.cookies?.accessToken;
+    }
+
+    if (!token) {
       return res.status(401).json({ message: "Not authorized" });
     }
 
-    const accessSecret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
-    if (!accessSecret) {
-      return res.status(500).json({ message: "JWT secret not configured" });
-    }
-
-    const decoded = jwt.verify(token, accessSecret);
+    const decoded = verifyAccessToken(token);
 
     const user = await User.findById(decoded.id);
 
     if (!user) {
       return res.status(401).json({ message: "User not found" });
+    }
+
+    if (
+      decoded?.tokenVersion === undefined ||
+      decoded.tokenVersion !== user.tokenVersion
+    ) {
+      return res.status(401).json({ message: "Token revoked" });
     }
 
     req.user = user;

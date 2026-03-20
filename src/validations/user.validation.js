@@ -9,8 +9,6 @@ export const registerSchema = Joi.object({
     .min(6)
     .pattern(new RegExp("^[a-zA-Z0-9@#$%^&*!]{6,30}$"))
     .required(),
-
-  role: Joi.string().valid("user", "admin"),
 });
 
 export const loginSchema = Joi.object({

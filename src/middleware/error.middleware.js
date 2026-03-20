@@ -1,5 +1,10 @@
 export const errorHandler = (err, req, res, next) => {
-  console.error(err);
+  const isProduction = process.env.NODE_ENV === "production";
+  if (isProduction) {
+    console.error(err?.message || err);
+  } else {
+    console.error(err);
+  }
 
   if (err?.message === "Not allowed by CORS") {
     return res.status(403).json({ success: false, message: err.message });
@@ -20,8 +25,14 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  res.status(err.statusCode || 500).json({
+  const statusCode = err.statusCode || 500;
+  const message =
+    statusCode >= 500 && isProduction
+      ? "Internal Server Error"
+      : err.message || "Internal Server Error";
+
+  res.status(statusCode).json({
     success: false,
-    message: err.message || "Internal Server Error",
+    message,
   });
 };

@@ -10,6 +10,22 @@ import userRoutes from "./routes/user.routes.js";
 // 1.Initialize Express
 const app = express();
 
+const isProduction = process.env.NODE_ENV === "production";
+
+const parseTrustProxy = (value) => {
+  const v = String(value).trim().toLowerCase();
+  if (v === "true") return true;
+  if (v === "false") return false;
+  if (/^\d+$/.test(v)) return Number(v);
+  return value;
+};
+
+if (process.env.TRUST_PROXY !== undefined) {
+  app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
+} else if (isProduction) {
+  app.set("trust proxy", 1);
+}
+
 // 2.Security Middleware
 app.use(helmet());
 
@@ -23,7 +39,12 @@ app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      if (allowedOrigins.length === 0) return callback(null, true);
+      if (allowedOrigins.length === 0) {
+        return callback(
+          isProduction ? new Error("Not allowed by CORS") : null,
+          !isProduction,
+        );
+      }
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error("Not allowed by CORS"));
     },
