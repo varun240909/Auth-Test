@@ -2,6 +2,7 @@ import crypto from "crypto";
 import User from "../models/User.model.js";
 import RefreshSession from "../models/RefreshSession.model.js";
 import ApiError from "../utils/ApiError.js";
+import { isEmailConfigured, sendVerificationEmail } from "../services/email.service.js";
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -14,14 +15,46 @@ import {
   clearRefreshCookieOptions,
 } from "../utils/cookie.js";
 
+const isProduction = process.env.NODE_ENV === "production";
+const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+const hashSha256 = (value) =>
+  crypto.createHash("sha256").update(String(value)).digest("hex");
+
 const hashToken = (token) =>
-  crypto.createHash("sha256").update(String(token)).digest("hex");
+  hashSha256(token);
 
 const timingSafeEqual = (a, b) => {
   const left = Buffer.from(String(a));
   const right = Buffer.from(String(b));
   if (left.length !== right.length) return false;
   return crypto.timingSafeEqual(left, right);
+};
+
+const createEmailVerificationToken = () => {
+  const token = crypto.randomBytes(32).toString("hex");
+  return {
+    token,
+    tokenHash: hashSha256(token),
+    expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
+  };
+};
+
+const maybeSendVerificationEmail = async ({ email, token }) => {
+  if (!isEmailConfigured()) {
+    if (!isProduction) {
+      console.warn(
+        "Email not configured; returning verification token in response (dev only).",
+      );
+    }
+    return;
+  }
+
+  try {
+    await sendVerificationEmail({ to: email, token });
+  } catch (err) {
+    console.error("Failed to send verification email:", err?.message || err);
+  }
 };
 
 const newSessionId = () =>
@@ -36,28 +69,26 @@ const getSessionMetadata = (req) => ({
 
 export const register = async (req, res, next) => {
   try {
-    const user = await User.create({ ...req.body, role: "user" });
+    const verification = createEmailVerificationToken();
 
-    const sessionId = newSessionId();
-    const accessToken = generateAccessToken(user, { sessionId });
-    const refreshToken = generateRefreshToken(user, sessionId);
-
-    const refreshDecoded = verifyRefreshToken(refreshToken);
-    await RefreshSession.create({
-      user: user._id,
-      sessionId,
-      refreshTokenHash: hashToken(refreshToken),
-      lastUsedAt: new Date(),
-      expiresAt: new Date((refreshDecoded.exp || 0) * 1000),
-      ...getSessionMetadata(req),
+    const user = await User.create({
+      ...req.body,
+      role: "user",
+      isVerified: false,
+      emailVerificationTokenHash: verification.tokenHash,
+      emailVerificationTokenExpiresAt: verification.expiresAt,
     });
 
-    res.cookie("accessToken", accessToken, accessCookieOptions);
-    res.cookie("refreshToken", refreshToken, refreshCookieOptions);
+    await maybeSendVerificationEmail({
+      email: user.email,
+      token: verification.token,
+    });
 
     res.status(201).json({
       success: true,
+      message: "Registration successful. Verify your email to continue.",
       user,
+      ...(isProduction ? {} : { emailVerificationToken: verification.token }),
     });
   } catch (err) {
     next(err);
@@ -72,6 +103,10 @@ export const login = async (req, res, next) => {
 
     if (!user || !(await user.comparePassword(req.body.password))) {
       throw new ApiError(401, "Invalid credentials");
+    }
+
+    if (!user.isVerified) {
+      throw new ApiError(403, "Account not verified");
     }
 
     const sessionId = newSessionId();
@@ -111,6 +146,12 @@ export const refreshToken = async (req, res, next) => {
 
     const user = await User.findById(decoded.id);
     if (!user) throw new ApiError(401, "User not found");
+
+    if (!user.isVerified) {
+      res.clearCookie("accessToken", clearAccessCookieOptions);
+      res.clearCookie("refreshToken", clearRefreshCookieOptions);
+      throw new ApiError(403, "Account not verified");
+    }
 
     if (
       decoded?.tokenVersion === undefined ||
@@ -228,4 +269,107 @@ export const logoutAll = async (req, res, next) => {
     success: true,
     message: "Logged out from all sessions",
   });
+};
+
+export const resendVerification = async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.json({
+        success: true,
+        message: "If the account exists, a verification email has been sent.",
+      });
+    }
+
+    if (user.isVerified) {
+      return res.json({ success: true, message: "Account already verified" });
+    }
+
+    const verification = createEmailVerificationToken();
+    user.emailVerificationTokenHash = verification.tokenHash;
+    user.emailVerificationTokenExpiresAt = verification.expiresAt;
+    await user.save();
+
+    await maybeSendVerificationEmail({
+      email: user.email,
+      token: verification.token,
+    });
+
+    return res.json({
+      success: true,
+      message: "Verification token created",
+      ...(isProduction ? {} : { emailVerificationToken: verification.token }),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const verifyEmailToken = async ({ email, token }) => {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const presentedToken = String(token || "");
+
+  const user = await User.findOne({ email: normalizedEmail }).select(
+    "+emailVerificationTokenHash +emailVerificationTokenExpiresAt",
+  );
+  if (!user) throw new ApiError(400, "Invalid verification token");
+
+  if (user.isVerified) {
+    return { alreadyVerified: true };
+  }
+
+  const now = new Date();
+  if (
+    !user.emailVerificationTokenHash ||
+    !user.emailVerificationTokenExpiresAt ||
+    user.emailVerificationTokenExpiresAt <= now
+  ) {
+    throw new ApiError(400, "Verification token expired");
+  }
+
+  const presentedHash = hashSha256(presentedToken);
+  if (!timingSafeEqual(presentedHash, user.emailVerificationTokenHash)) {
+    throw new ApiError(400, "Invalid verification token");
+  }
+
+  user.isVerified = true;
+  user.emailVerificationTokenHash = undefined;
+  user.emailVerificationTokenExpiresAt = undefined;
+  await user.save();
+
+  return { verified: true };
+};
+
+export const verifyEmail = async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const token = String(req.body?.token || "");
+
+    const result = await verifyEmailToken({ email, token });
+    if (result.alreadyVerified) {
+      return res.json({ success: true, message: "Account already verified" });
+    }
+    return res.json({ success: true, message: "Email verified" });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const verifyEmailLink = async (req, res, next) => {
+  try {
+    const email = String(req.query?.email || "").trim().toLowerCase();
+    const token = String(req.query?.token || "");
+
+    const result = await verifyEmailToken({ email, token });
+    if (result.alreadyVerified) {
+      return res.status(200).json({ success: true, message: "Already verified" });
+    }
+
+    return res.status(200).json({ success: true, message: "Email verified" });
+  } catch (err) {
+    next(err);
+  }
 };

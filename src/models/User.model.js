@@ -21,7 +21,8 @@ const userSchema = new mongoose.Schema(
     password: {
       type: String,
       required: true,
-      minlength: 6,
+      minlength: 8,
+      maxlength: 72,
       select: false,
     },
     role: {
@@ -32,6 +33,16 @@ const userSchema = new mongoose.Schema(
     isVerified: {
       type: Boolean,
       default: false,
+    },
+    emailVerificationTokenHash: {
+      type: String,
+      default: null,
+      select: false,
+    },
+    emailVerificationTokenExpiresAt: {
+      type: Date,
+      default: null,
+      select: false,
     },
     tokenVersion: {
       type: Number,
@@ -56,6 +67,8 @@ userSchema.methods.comparePassword = async function (password) {
 userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
+  delete obj.emailVerificationTokenHash;
+  delete obj.emailVerificationTokenExpiresAt;
   delete obj.tokenVersion;
   return obj;
 };

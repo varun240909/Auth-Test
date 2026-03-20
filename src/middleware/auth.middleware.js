@@ -1,4 +1,5 @@
 import User from "../models/User.model.js";
+import RefreshSession from "../models/RefreshSession.model.js";
 import { verifyAccessToken } from "../utils/token.js";
 
 export const protect = async (req, res, next) => {
@@ -25,11 +26,31 @@ export const protect = async (req, res, next) => {
       return res.status(401).json({ message: "User not found" });
     }
 
+    if (!user.isVerified) {
+      return res.status(403).json({ message: "Account not verified" });
+    }
+
     if (
       decoded?.tokenVersion === undefined ||
       decoded.tokenVersion !== user.tokenVersion
     ) {
       return res.status(401).json({ message: "Token revoked" });
+    }
+
+    if (!decoded?.sid) {
+      return res.status(401).json({ message: "Invalid token session" });
+    }
+
+    const now = new Date();
+    const activeSession = await RefreshSession.findOne({
+      user: user._id,
+      sessionId: decoded.sid,
+      revokedAt: null,
+      expiresAt: { $gt: now },
+    }).select({ _id: 1 });
+
+    if (!activeSession) {
+      return res.status(401).json({ message: "Session expired" });
     }
 
     req.user = user;
